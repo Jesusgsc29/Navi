@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Knot Transaction Link — Web SDK</title>
+    <script src="https://unpkg.com/knotapi-js@next"></script>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 42rem;
+        margin: 2rem auto;
+        padding: 0 1rem;
+        line-height: 1.5;
+      }
+      button {
+        font: inherit;
+        padding: 0.5rem 1rem;
+        cursor: pointer;
+      }
+      pre {
+        background: #f4f4f5;
+        padding: 1rem;
+        overflow: auto;
+        font-size: 0.85rem;
+        border-radius: 6px;
+      }
+      .err {
+        color: #b91c1c;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Knot Web SDK</h1>
+    <p>
+      Creates a Transaction Link session on the server, then opens the Knot UI.
+      Use Knot&rsquo;s
+      <a href="https://docs.knotapi.com/transaction-link/testing" target="_blank" rel="noopener"
+        >test merchant credentials</a
+      >
+      in development.
+    </p>
+    <p style="font-size: 0.9rem; color: #52525b">
+      Knot rate-limits heavy testing. If you see <strong>429</strong>, wait 1–2 minutes, avoid double-clicking, and
+      don&rsquo;t open multiple SDK flows at once.
+    </p>
+    <p>
+      <button type="button" id="open">Open Knot linking</button>
+    </p>
+    <p id="api-hint" style="font-size: 0.9rem; color: #52525b"></p>
+    <pre id="log"></pre>
+    <script>
+      const logEl = document.getElementById("log");
+      const params = new URLSearchParams(location.search);
+      const API_BASE =
+        (typeof window.__KNOT_API_BASE__ === "string" && window.__KNOT_API_BASE__) ||
+        params.get("api") ||
+        "http://localhost:5000";
+      const sessionUrl = new URL("/api/knot/session", API_BASE).href;
+
+      document.getElementById("api-hint").textContent =
+        "Backend API: " +
+        sessionUrl +
+        " — override with ?api=http://localhost:YOUR_PORT if needed.";
+
+      function log(msg, isErr) {
+        const line =
+          typeof msg === "string" ? msg : JSON.stringify(msg, null, 2);
+        logEl.textContent += (isErr ? "[error] " : "") + line + "\n\n";
+      }
+
+      async function postSession(maxAttempts) {
+        maxAttempts = maxAttempts || 5;
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+          const r = await fetch(sessionUrl, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({})
+          });
+          const data = await r.json().catch(function () {
+            return {};
+          });
+          if (r.status === 429 && attempt < maxAttempts - 1) {
+            var ra = r.headers.get("retry-after");
+            var sec = ra ? parseInt(ra, 10) : NaN;
+            var waitMs = !isNaN(sec) && sec > 0 ? sec * 1000 : 3000 * (attempt + 1);
+            waitMs = Math.min(waitMs, 120000);
+            log("429 rate limited — waiting " + Math.round(waitMs / 1000) + "s before retry...", true);
+            await new Promise(function (res) {
+              setTimeout(res, waitMs);
+            });
+            continue;
+          }
+          if (!r.ok) {
+            throw new Error(data.error || r.statusText || String(r.status));
+          }
+          return data;
+        }
+        throw new Error("Still rate limited after retries — wait a minute and try again.");
+      }
+
+      document.getElementById("open").addEventListener("click", async () => {
+        logEl.textContent = "";
+        try {
+          const data = await postSession();
+          log("Session: " + JSON.stringify(data, null, 2));
+
+          const filteredIds = Array.isArray(data.merchantIds)
+            ? data.merchantIds.filter((n) => typeof n === "number" && Number.isFinite(n))
+            : [];
+          const merchantIds = filteredIds.length > 0 ? filteredIds : [19];
+
+          if (!data.sessionId || !data.clientId) {
+            throw new Error("API response missing sessionId or clientId.");
+          }
+
+          const KnotapiJS = window.KnotapiJS.default;
+          const knotapi = new KnotapiJS();
+          knotapi.open({
+            sessionId: data.sessionId,
+            clientId: data.clientId,
+            environment: data.environment,
+            merchantIds,
+            // Required for Transaction Link — without this, the SDK defaults to Card Switcher and may POST .../undefined
+            product: "transaction_link",
+            entryPoint: "web_demo",
+            onSuccess: (details) => log("onSuccess: " + JSON.stringify(details)),
+            onError: (err) =>
+              log(
+                `${err && err.errorCode ? err.errorCode : "error"}: ${err && err.errorDescription ? err.errorDescription : JSON.stringify(err)}`,
+                true
+              ),
+            onEvent: (knotEvent) => log(knotEvent),
+            onExit: () => log("onExit")
+          });
+        } catch (e) {
+          log(e instanceof Error ? e.message : String(e), true);
+        }
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,8 @@
+{
+  "servers": {
+    "knot-docs": {
+      "type": "http",
+      "url": "https://docs.knotapi.com/mcp"
+    }
+  }
+}

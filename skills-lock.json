@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "skills": {
+    "knot-prototype-transactions": {
+      "source": "docs.knotapi.com",
+      "sourceType": "well-known",
+      "computedHash": "9a2be8148d1a0851002db64c5411cada057820b6fb38cdfaf2950fe4572653ad"
+    },
+    "knot-sdk": {
+      "source": "docs.knotapi.com",
+      "sourceType": "well-known",
+      "computedHash": "8190a37e6479d19ef1c71542ec6410528eec3560c1f4e52fc389ca2c5161d3d0"
+    },
+    "knot-subscriptions": {
+      "source": "docs.knotapi.com",
+      "sourceType": "well-known",
+      "computedHash": "54de05ef32aab9bdcd4b82e85701098c4ba3f9815728eae3cf26c60f40cd3230"
+    },
+    "knot-sync-transactions": {
+      "source": "docs.knotapi.com",
+      "sourceType": "well-known",
+      "computedHash": "18386ac30c7efdbeafd52850b05a84bcffd951530347d14ab76c38141c8f627e"
+    },
+    "knot-transaction-link": {
+      "source": "docs.knotapi.com",
+      "sourceType": "well-known",
+      "computedHash": "4bd8d5e35461f6643e607fe8a1e53e2d21905f33f173c135538449e473c34308"
+    }
+  }
+}

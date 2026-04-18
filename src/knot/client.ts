@@ -3,6 +3,7 @@ import {
   KnotTransactionSyncRequest,
   KnotTransactionSyncResponse
 } from "./types.js";
+import { knotFetch, KnotApiError } from "./knotFetch.js";
 
 export type KnotClientConfig = {
   baseUrl: string;
@@ -16,7 +17,7 @@ export class KnotClient {
   async syncTransactions(
     input: KnotTransactionSyncRequest
   ): Promise<KnotTransactionSyncResponse> {
-    const response = await fetch(`${this.config.baseUrl}/transactions/sync`, {
+    const response = await knotFetch(`${this.config.baseUrl}/transactions/sync`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -29,8 +30,9 @@ export class KnotClient {
 
     if (!response.ok) {
       const message = await response.text();
-      throw new Error(
-        `Knot sync failed (${response.status}): ${message || response.statusText}`
+      throw new KnotApiError(
+        `Knot sync failed (${response.status}): ${message || response.statusText}`,
+        response.status
       );
     }
 
@@ -60,6 +62,8 @@ export class KnotClient {
         break;
       }
       cursor = page.next_cursor;
+      // Space out pagination to avoid burst rate limits on large syncs.
+      await new Promise((r) => setTimeout(r, 150));
     }
 
     return all;

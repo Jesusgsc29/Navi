@@ -1,21 +1,41 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { onPurchaseReceived } from "./agent/workflow.js";
 import { mockOffers } from "./mock/offers.js";
 import { createConsoleNotifier } from "./notifications/notifier.js";
 import { KnotClient } from "./knot/client.js";
 import { knotTransactionToPurchaseEvent } from "./knot/mapper.js";
+import { createTransactionLinkSession, KnotApiError } from "./knot/session.js";
 import { KnotWebhookEvent } from "./knot/types.js";
 import "dotenv/config";
 
+const projectRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
+const knotDemoPagePath = path.join(projectRoot, "public", "knot.html");
+
 const env = {
   port: Number(process.env.PORT ?? 5000),
+  /** Comma-separated browser origins allowed to call POST /api/knot/session (e.g. static dev server on another port). */
+  frontendOrigins: (process.env.FRONTEND_ORIGIN ?? "http://localhost:3000")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
   knotBaseUrl: process.env.KNOT_BASE_URL ?? "https://development.knotapi.com",
   knotClientId: process.env.KNOT_CLIENT_ID ?? "",
   knotSecret: process.env.KNOT_SECRET ?? "",
   knotWebhookSecret: process.env.KNOT_WEBHOOK_SECRET ?? "",
   knotWebhookSignatureHeader:
-    process.env.KNOT_WEBHOOK_SIGNATURE_HEADER ?? "x-knot-signature"
+    process.env.KNOT_WEBHOOK_SIGNATURE_HEADER ?? "x-knot-signature",
+  knotMerchantId: (() => {
+    const raw = process.env.KNOT_MERCHANT_ID;
+    const n = Number(raw && raw.trim() !== "" ? raw : "19");
+    if (!Number.isFinite(n) || n <= 0) {
+      return 19;
+    }
+    return n;
+  })()
 };
 
 const knotClient =
@@ -61,6 +81,166 @@ function json(res: ServerResponse, status: number, payload: unknown): void {
   res.statusCode = status;
   res.setHeader("content-type", "application/json");
   res.end(JSON.stringify(payload));
+}
+
+function requestOrigin(req: IncomingMessage): string | undefined {
+  const v = req.headers.origin;
+  if (Array.isArray(v)) {
+    return v[0];
+  }
+  return typeof v === "string" ? v : undefined;
+}
+
+/** Dev-only: allow CORS when the page is served from an ngrok browser tunnel (Origin ends with ngrok host). */
+function isNgrokBrowserOrigin(origin: string): boolean {
+  if (process.env.CORS_ALLOW_NGROK !== "true") {
+    return false;
+  }
+  try {
+    const host = new URL(origin).hostname;
+    return (
+      host.endsWith(".ngrok-free.dev") ||
+      host.endsWith(".ngrok-free.app") ||
+      host.endsWith(".ngrok.io")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isFrontendOriginAllowed(origin: string): boolean {
+  return (
+    env.frontendOrigins.includes(origin) || isNgrokBrowserOrigin(origin)
+  );
+}
+
+/** CORS for the Knot demo when the HTML is served from FRONTEND_ORIGIN (another port). */
+function applyCorsForSessionApi(req: IncomingMessage, res: ServerResponse): void {
+  const origin = requestOrigin(req);
+  if (!origin || !isFrontendOriginAllowed(origin)) {
+    return;
+  }
+  res.setHeader("Access-Control-Allow-Origin", origin);
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "content-type");
+  res.setHeader("Access-Control-Expose-Headers", "retry-after");
+  res.setHeader("Access-Control-Max-Age", "86400");
+  res.setHeader("Vary", "Origin");
+}
+
+function jsonCors(
+  req: IncomingMessage,
+  res: ServerResponse,
+  status: number,
+  payload: unknown,
+  extraHeaders?: Record<string, string>
+): void {
+  applyCorsForSessionApi(req, res);
+  if (extraHeaders) {
+    for (const [key, value] of Object.entries(extraHeaders)) {
+      res.setHeader(key, value);
+    }
+  }
+  res.statusCode = status;
+  res.setHeader("content-type", "application/json");
+  res.end(JSON.stringify(payload));
+}
+
+function pathnameOnly(url: string | undefined): string {
+  if (!url) return "/";
+  const p = url.split("?")[0] ?? "/";
+  return p === "" ? "/" : p;
+}
+
+function knotSdkEnvironment(): "development" | "production" {
+  const v = process.env.KNOT_SDK_ENVIRONMENT;
+  if (v === "production" || v === "development") {
+    return v;
+  }
+  return env.knotBaseUrl.includes("development") ? "development" : "production";
+}
+
+async function serveKnotDemoPage(res: ServerResponse): Promise<void> {
+  try {
+    const html = await readFile(knotDemoPagePath, "utf8");
+    res.statusCode = 200;
+    res.setHeader("content-type", "text/html; charset=utf-8");
+    res.end(html);
+  } catch {
+    json(res, 500, { error: "Could not read public/knot.html." });
+  }
+}
+
+async function handleKnotWebSession(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (!env.knotClientId || !env.knotSecret) {
+    jsonCors(req, res, 500, {
+      error: "Missing Knot credentials. Set KNOT_CLIENT_ID and KNOT_SECRET."
+    });
+    return;
+  }
+
+  let merchantIds: number[] = [env.knotMerchantId];
+  let externalUserId: string | undefined =
+    process.env.EXTERNAL_USER_ID?.trim() || undefined;
+
+  if (req.method === "POST") {
+    const raw = await readBody(req);
+    if (raw.trim()) {
+      let parsed: {
+        external_user_id?: unknown;
+        merchant_ids?: unknown;
+      };
+      try {
+        parsed = JSON.parse(raw) as {
+          external_user_id?: unknown;
+          merchant_ids?: unknown;
+        };
+      } catch {
+        jsonCors(req, res, 400, { error: "Invalid JSON body." });
+        return;
+      }
+      if (
+        typeof parsed.external_user_id === "string" &&
+        parsed.external_user_id.trim()
+      ) {
+        externalUserId = parsed.external_user_id.trim();
+      }
+      if (Array.isArray(parsed.merchant_ids) && parsed.merchant_ids.length > 0) {
+        const ids = parsed.merchant_ids.filter(
+          (x): x is number => typeof x === "number"
+        );
+        if (ids.length > 0) {
+          merchantIds = ids;
+        }
+      }
+    }
+  }
+
+  try {
+    const { session, external_user_id } = await createTransactionLinkSession({
+      baseUrl: env.knotBaseUrl,
+      clientId: env.knotClientId,
+      secret: env.knotSecret,
+      externalUserId
+    });
+    jsonCors(req, res, 200, {
+      sessionId: session,
+      clientId: env.knotClientId,
+      environment: knotSdkEnvironment(),
+      merchantIds,
+      product: "transaction_link",
+      external_user_id
+    });
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Session create failed.";
+    const status =
+      error instanceof KnotApiError && error.status === 429 ? 429 : 502;
+    jsonCors(req, res, status, { error: message }, status === 429 ? { "Retry-After": "60" } : undefined);
+  }
 }
 
 async function handleKnotWebhook(
@@ -146,12 +326,38 @@ async function handleKnotWebhook(
 
 const server = createServer(async (req, res) => {
   try {
-    if (req.method === "GET" && req.url === "/health") {
+    const pathName = pathnameOnly(req.url);
+    if (req.method === "GET" && pathName === "/") {
+      json(res, 200, {
+        message:
+          "Welcome to the Navi webhook server! Use GET /health or POST /webhooks/knot",
+      });
+      return;
+    }
+
+    if (req.method === "OPTIONS" && pathName === "/api/knot/session") {
+      applyCorsForSessionApi(req, res);
+      res.statusCode = 204;
+      res.end();
+      return;
+    }
+
+    if (req.method === "GET" && pathName === "/health") {
       json(res, 200, { ok: true });
       return;
     }
 
-    if (req.method === "POST" && req.url === "/webhooks/knot") {
+    if (req.method === "GET" && pathName === "/knot") {
+      await serveKnotDemoPage(res);
+      return;
+    }
+
+    if (req.method === "POST" && pathName === "/api/knot/session") {
+      await handleKnotWebSession(req, res);
+      return;
+    }
+
+    if (req.method === "POST" && pathName === "/webhooks/knot") {
       await handleKnotWebhook(req, res);
       return;
     }
@@ -164,6 +370,15 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(env.port, () => {
-  console.log(`Webhook server listening on http://localhost:${env.port}`);
-  console.log("POST /webhooks/knot for Knot webhook events");
+  console.log(`API + webhooks: http://localhost:${env.port}`);
+  console.log("POST /webhooks/knot");
+  console.log("POST /api/knot/session (CORS: FRONTEND_ORIGIN or CORS_ALLOW_NGROK=true)");
+  console.log(`GET  /knot — same-origin Knot demo (optional)`);
+  console.log(
+    `Frontend demo: npm run dev:frontend → http://localhost:3000/knot.html (API ${env.port})`
+  );
+  console.log(`FRONTEND_ORIGIN allowlist: ${env.frontendOrigins.join(", ")}`);
+  if (process.env.CORS_ALLOW_NGROK === "true") {
+    console.log("CORS_ALLOW_NGROK: allowing *.ngrok-free.dev / *.ngrok-free.app / *.ngrok.io");
+  }
 });
