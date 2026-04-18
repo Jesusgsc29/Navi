@@ -15,7 +15,7 @@ const env = {
   knotSecret: process.env.KNOT_SECRET ?? "",
   knotWebhookSecret: process.env.KNOT_WEBHOOK_SECRET ?? "",
   knotWebhookSignatureHeader:
-    process.env.KNOT_WEBHOOK_SIGNATURE_HEADER ?? "x-knot-signature"
+    process.env.KNOT_WEBHOOK_SIGNATURE_HEADER ?? "x-knot-signature",
 };
 
 const knotClient =
@@ -23,7 +23,7 @@ const knotClient =
     ? new KnotClient({
         baseUrl: env.knotBaseUrl,
         clientId: env.knotClientId,
-        secret: env.knotSecret
+        secret: env.knotSecret,
       })
     : null;
 
@@ -65,22 +65,21 @@ function json(res: ServerResponse, status: number, payload: unknown): void {
 
 async function handleKnotWebhook(
   req: IncomingMessage,
-  res: ServerResponse
+  res: ServerResponse,
 ): Promise<void> {
   if (!knotClient) {
     json(res, 500, {
-      error: "Missing Knot credentials. Set KNOT_CLIENT_ID and KNOT_SECRET."
+      error: "Missing Knot credentials. Set KNOT_CLIENT_ID and KNOT_SECRET.",
     });
     return;
   }
 
   const rawBody = await readBody(req);
-  const signatureHeaderValue = req.headers[
-    env.knotWebhookSignatureHeader.toLowerCase() 
-  ];
+  const signatureHeaderValue =
+    req.headers[env.knotWebhookSignatureHeader.toLowerCase()];
   const signature = Array.isArray(signatureHeaderValue)
     ? signatureHeaderValue[0]
-    : signatureHeaderValue ?? "";
+    : (signatureHeaderValue ?? "");
 
   if (env.knotWebhookSecret && !verifySignature(rawBody, signature)) {
     json(res, 401, { error: "Invalid webhook signature." });
@@ -109,56 +108,70 @@ async function handleKnotWebhook(
     typeof event.external_user_id !== "string"
   ) {
     json(res, 400, {
-      error: "Webhook payload missing merchant_id or external_user_id."
+      error: "Webhook payload missing merchant_id or external_user_id.",
     });
     return;
   }
 
   const transactions = await knotClient.syncAllTransactions({
     merchant_id: event.merchant_id,
-    external_user_id: event.external_user_id
+    external_user_id: event.external_user_id,
   });
 
   let processed = 0;
   for (const transaction of transactions) {
     const purchase = knotTransactionToPurchaseEvent(
       transaction,
-      event.external_user_id
+      event.external_user_id,
     );
     await onPurchaseReceived(
       purchase,
       {
         getOffers: async (productId) =>
           mockOffers.filter((offer) => offer.productId === productId),
-        notifier
+        notifier,
       },
       {
         maxDistance: 5,
         minSavingsAbs: 1.5,
-        minSavingsPct: 0.08
-      }
+        minSavingsPct: 0.08,
+      },
     );
     processed += 1;
   }
 
   json(res, 200, { ok: true, processed });
 }
+function pathnameOnly(url: string | undefined): string {
+  if (!url) return "/";
+  const path = url.split("?")[0] ?? "/";
+  return path === "" ? "/" : path;
+}
 
 const server = createServer(async (req, res) => {
   try {
-    if (req.method === "GET" && req.url === "/health") {
+    const path = pathnameOnly(req.url);
+    if (req.method === "GET" && path === "/") {
+      json(res, 200, {
+        message:
+          "Welcome to the Navi webhook server! Use GET /health or POST /webhooks/knot",
+      });
+      return;
+    }
+    if (req.method === "GET" && path === "/health") {
       json(res, 200, { ok: true });
       return;
     }
 
-    if (req.method === "POST" && req.url === "/webhooks/knot") {
+    if (req.method === "POST" && path === "/webhooks/knot") {
       await handleKnotWebhook(req, res);
       return;
     }
 
     json(res, 404, { error: "Not found." });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Unexpected error.";
+    const message =
+      error instanceof Error ? error.message : "Unexpected error.";
     json(res, 500, { error: message });
   }
 });
