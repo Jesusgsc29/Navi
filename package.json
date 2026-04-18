@@ -1,0 +1,22 @@
+{
+  "name": "hackathonproject2026",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx --env-file=.env src/index.ts",
+    "dev:webhook": "tsx --env-file=.env src/server.ts",
+    "build": "tsc --env-file=.env -p tsconfig.json",
+    "start": "node --env-file=.env dist/index.js",
+    "start:webhook": "node --env-file=.env dist/server.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "spectrum-ts": "^0.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}
