@@ -8,7 +8,8 @@
     "dev:webhook": "tsx --env-file=.env src/server.ts",
     "build": "tsc --env-file=.env -p tsconfig.json",
     "start": "node --env-file=.env dist/index.js",
-    "start:webhook": "node --env-file=.env dist/server.js"
+    "start:webhook": "node --env-file=.env dist/server.js",
+    "knot:session": "tsx --env-file=.env scripts/create-knot-session.ts"
   },
   "dependencies": {
     "dotenv": "^17.4.2",
